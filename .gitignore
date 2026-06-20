@@ -1,0 +1,19 @@
+# Virtual environment
+.venv/
+
+# Trained models / checkpoints (large binaries)
+checkpoints/
+*.zip
+
+# Training logs / runs
+runs/
+
+# External reference clone (has its own git history)
+multi_car_racing/
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
