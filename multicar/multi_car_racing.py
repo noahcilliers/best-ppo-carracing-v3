@@ -186,6 +186,9 @@ class MultiCarRacing(gym.Env, EzPickle):
         random_spawn: bool = True,
         collisions: bool = False,
         max_episode_steps: int | None = 1000,
+        track_scale: float = 1.0,
+        track_width_scale: float = 1.0,
+        restitution: float = 0.0,
     ):
         EzPickle.__init__(
             self,
@@ -198,6 +201,9 @@ class MultiCarRacing(gym.Env, EzPickle):
             random_spawn,
             collisions,
             max_episode_steps,
+            track_scale,
+            track_width_scale,
+            restitution,
         )
         assert num_agents >= 1, "num_agents must be >= 1"
         self.num_agents = num_agents
@@ -208,6 +214,26 @@ class MultiCarRacing(gym.Env, EzPickle):
         self.collisions = collisions
         self.max_episode_steps = max_episode_steps
         self.verbose = verbose
+
+        # Track-size knobs. track_scale enlarges the whole loop; track_width_scale
+        # widens just the road (the lever for giving two cars room to race
+        # side-by-side); restitution makes a car-to-car hit bounce instead of
+        # grind. Defaults (1.0, 1.0, 0.0) reproduce stock CarRacing geometry.
+        # NOTE: changing these shifts the camera/observation away from what a
+        # CarRacing-v3-trained policy expects — great for *watching* collisions,
+        # but retrain (or keep defaults) for real driving quality.
+        self.track_scale = track_scale
+        self.track_width_scale = track_width_scale
+        self.restitution = restitution
+        self.track_rad = TRACK_RAD * track_scale
+        self.playfield = PLAYFIELD * track_scale
+        self.track_width = TRACK_WIDTH * track_width_scale
+        self.grass_dim = GRASS_DIM * track_scale
+        self.max_shape_dim = (
+            max(self.grass_dim, self.track_width, TRACK_DETAIL_STEP)
+            * math.sqrt(2) * ZOOM * SCALE
+        )
+
         self._init_colors()
 
         self.contactListener_keepref = MultiFrictionDetector(self, lap_complete_percent)
@@ -294,6 +320,10 @@ class MultiCarRacing(gym.Env, EzPickle):
                 filt = f.filterData
                 filt.groupIndex = group
                 f.filterData = filt
+        # Bounciness so a car-to-car hit reads as a bounce, not a grind.
+        if enabled and self.restitution > 0:
+            for f in car.hull.fixtures:
+                f.restitution = self.restitution
 
     # ------------------------------------------------------------------ track
     def _create_track(self):
@@ -302,18 +332,18 @@ class MultiCarRacing(gym.Env, EzPickle):
         for c in range(CHECKPOINTS):
             noise = self.np_random.uniform(0, 2 * math.pi * 1 / CHECKPOINTS)
             alpha = 2 * math.pi * c / CHECKPOINTS + noise
-            rad = self.np_random.uniform(TRACK_RAD / 3, TRACK_RAD)
+            rad = self.np_random.uniform(self.track_rad / 3, self.track_rad)
             if c == 0:
                 alpha = 0
-                rad = 1.5 * TRACK_RAD
+                rad = 1.5 * self.track_rad
             if c == CHECKPOINTS - 1:
                 alpha = 2 * math.pi * c / CHECKPOINTS
                 self.start_alpha = 2 * math.pi * (-0.5) / CHECKPOINTS
-                rad = 1.5 * TRACK_RAD
+                rad = 1.5 * self.track_rad
             checkpoints.append((alpha, rad * math.cos(alpha), rad * math.sin(alpha)))
         self.road = []
 
-        x, y, beta = 1.5 * TRACK_RAD, 0, 0
+        x, y, beta = 1.5 * self.track_rad, 0, 0
         dest_i = 0
         laps = 0
         track = []
@@ -415,10 +445,10 @@ class MultiCarRacing(gym.Env, EzPickle):
         for i in range(len(track)):
             alpha1, beta1, x1, y1 = track[i]
             alpha2, beta2, x2, y2 = track[i - 1]
-            road1_l = (x1 - TRACK_WIDTH * math.cos(beta1), y1 - TRACK_WIDTH * math.sin(beta1))
-            road1_r = (x1 + TRACK_WIDTH * math.cos(beta1), y1 + TRACK_WIDTH * math.sin(beta1))
-            road2_l = (x2 - TRACK_WIDTH * math.cos(beta2), y2 - TRACK_WIDTH * math.sin(beta2))
-            road2_r = (x2 + TRACK_WIDTH * math.cos(beta2), y2 + TRACK_WIDTH * math.sin(beta2))
+            road1_l = (x1 - self.track_width * math.cos(beta1), y1 - self.track_width * math.sin(beta1))
+            road1_r = (x1 + self.track_width * math.cos(beta1), y1 + self.track_width * math.sin(beta1))
+            road2_l = (x2 - self.track_width * math.cos(beta2), y2 - self.track_width * math.sin(beta2))
+            road2_r = (x2 + self.track_width * math.cos(beta2), y2 + self.track_width * math.sin(beta2))
             vertices = [road1_l, road1_r, road2_r, road2_l]
             self.fd_tile.shape.vertices = vertices
             t = self.world.CreateStaticBody(fixtures=self.fd_tile)
@@ -434,10 +464,10 @@ class MultiCarRacing(gym.Env, EzPickle):
             self.road.append(t)
             if border[i]:
                 side = np.sign(beta2 - beta1)
-                b1_l = (x1 + side * TRACK_WIDTH * math.cos(beta1), y1 + side * TRACK_WIDTH * math.sin(beta1))
-                b1_r = (x1 + side * (TRACK_WIDTH + BORDER) * math.cos(beta1), y1 + side * (TRACK_WIDTH + BORDER) * math.sin(beta1))
-                b2_l = (x2 + side * TRACK_WIDTH * math.cos(beta2), y2 + side * TRACK_WIDTH * math.sin(beta2))
-                b2_r = (x2 + side * (TRACK_WIDTH + BORDER) * math.cos(beta2), y2 + side * (TRACK_WIDTH + BORDER) * math.sin(beta2))
+                b1_l = (x1 + side * self.track_width * math.cos(beta1), y1 + side * self.track_width * math.sin(beta1))
+                b1_r = (x1 + side * (self.track_width + BORDER) * math.cos(beta1), y1 + side * (self.track_width + BORDER) * math.sin(beta1))
+                b2_l = (x2 + side * self.track_width * math.cos(beta2), y2 + side * self.track_width * math.sin(beta2))
+                b2_r = (x2 + side * (self.track_width + BORDER) * math.cos(beta2), y2 + side * (self.track_width + BORDER) * math.sin(beta2))
                 self.road_poly.append(
                     ([b1_l, b1_r, b2_r, b2_l], (255, 255, 255) if i % 2 == 0 else (255, 0, 0))
                 )
@@ -478,7 +508,7 @@ class MultiCarRacing(gym.Env, EzPickle):
         poses = compute_spawn_poses(
             self.track,
             self.num_agents,
-            TRACK_WIDTH,
+            self.track_width,
             np_random=self.np_random if self.random_spawn else None,
         )
         self.cars = []
@@ -550,7 +580,7 @@ class MultiCarRacing(gym.Env, EzPickle):
                     self.car_done[k] = True
                     self.lap_finished[k] = True
                 x, y = car.hull.position
-                if abs(x) > PLAYFIELD or abs(y) > PLAYFIELD:
+                if abs(x) > self.playfield or abs(y) > self.playfield:
                     self.car_done[k] = True
                     self.lap_finished[k] = False
                     step_reward[k] = -100
@@ -670,20 +700,21 @@ class MultiCarRacing(gym.Env, EzPickle):
         pygame.display.flip()
 
     def _render_road(self, zoom, translation, angle):
-        bounds = PLAYFIELD
+        bounds = self.playfield
         field = [(bounds, bounds), (bounds, -bounds), (-bounds, -bounds), (-bounds, bounds)]
         self._draw_colored_polygon(
             self.surf, field, self.bg_color, zoom, translation, angle, clip=False
         )
         grass = []
+        gd = self.grass_dim
         for x in range(-20, 20, 2):
             for y in range(-20, 20, 2):
                 grass.append(
                     [
-                        (GRASS_DIM * x + GRASS_DIM, GRASS_DIM * y + 0),
-                        (GRASS_DIM * x + 0, GRASS_DIM * y + 0),
-                        (GRASS_DIM * x + 0, GRASS_DIM * y + GRASS_DIM),
-                        (GRASS_DIM * x + GRASS_DIM, GRASS_DIM * y + GRASS_DIM),
+                        (gd * x + gd, gd * y + 0),
+                        (gd * x + 0, gd * y + 0),
+                        (gd * x + 0, gd * y + gd),
+                        (gd * x + gd, gd * y + gd),
                     ]
                 )
         for poly in grass:
@@ -740,9 +771,9 @@ class MultiCarRacing(gym.Env, EzPickle):
     def _draw_colored_polygon(self, surface, poly, color, zoom, translation, angle, clip=True):
         poly = [pygame.math.Vector2(c).rotate_rad(angle) for c in poly]
         poly = [(c[0] * zoom + translation[0], c[1] * zoom + translation[1]) for c in poly]
+        msd = self.max_shape_dim
         if not clip or any(
-            (-MAX_SHAPE_DIM <= coord[0] <= WINDOW_W + MAX_SHAPE_DIM)
-            and (-MAX_SHAPE_DIM <= coord[1] <= WINDOW_H + MAX_SHAPE_DIM)
+            (-msd <= coord[0] <= WINDOW_W + msd) and (-msd <= coord[1] <= WINDOW_H + msd)
             for coord in poly
         ):
             gfxdraw.aapolygon(self.surf, poly, color)

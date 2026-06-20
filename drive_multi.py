@@ -37,6 +37,9 @@ def main():
     p.add_argument("--collisions", action="store_true", help="enable car-to-car contact")
     p.add_argument("--render", default=None, choices=[None, "human"], help="show a tiled window")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--track-scale", type=float, default=1.0, help="enlarge the whole loop")
+    p.add_argument("--track-width-scale", type=float, default=1.0, help="widen the road (room to race side-by-side)")
+    p.add_argument("--restitution", type=float, default=0.0, help="car-to-car bounciness, 0..1")
     args = p.parse_args()
 
     print(f"Loading policy: {args.model}")
@@ -53,6 +56,9 @@ def main():
         num_agents=args.num_agents,
         render_mode=args.render,
         collisions=args.collisions,
+        track_scale=args.track_scale,
+        track_width_scale=args.track_width_scale,
+        restitution=args.restitution,
     )
     pre = ObsPreprocessor(num_agents=args.num_agents, n_stack=n_stack)
 
