@@ -99,9 +99,18 @@ def main():
     p.add_argument("--target-kl", type=float, default=0.0,
                    help="PPO KL early-stop guardrail (0 = disabled)")
     p.add_argument("--resume", default=None,
-                   help="path to a checkpoint .zip to continue training from "
-                        "(e.g. checkpoints/ppo_carracing_2000000_steps.zip)")
+                   help="continue the SAME run from a checkpoint .zip: keeps the "
+                        "saved LR schedule and timestep counter (crash recovery)")
+    p.add_argument("--warm-start", default=None,
+                   help="start a NEW run from existing weights (e.g. fine-tune the "
+                        "868 for speed): installs a FRESH linear LR schedule from "
+                        "--lr and restarts the progress counter. Use this, not "
+                        "--resume, when changing the reward (the checkpoint's saved "
+                        "schedule has decayed to ~0 and would freeze learning).")
     args = p.parse_args()
+
+    if args.resume and args.warm_start:
+        p.error("use --resume OR --warm-start, not both")
 
     shaping = dict(
         k_grass=args.k_grass,
@@ -128,12 +137,25 @@ def main():
     eval_env = VecNormalize(eval_env, norm_obs=False, norm_reward=False, training=False)
     eval_env = VecTransposeImage(eval_env)
 
-    if args.resume:
-        # Continue a previous run: load the saved weights AND optimizer state,
-        # attach the fresh envs, and (below) keep the step counter going.
-        print(f"Resuming from {args.resume}")
-        model = PPO.load(args.resume, env=train_env, device=args.device,
-                         tensorboard_log="runs/")
+    if args.resume or args.warm_start:
+        source = args.resume or args.warm_start
+        load_kwargs = dict(env=train_env, device=args.device, tensorboard_log="runs/")
+        if args.warm_start:
+            # New objective from existing weights: REPLACE the checkpoint's
+            # exhausted LR schedule (decayed to ~0) with a fresh one from --lr, so
+            # fine-tuning actually learns. Mirrors selfplay.load_warmstart_ppo.
+            print(f"Warm-starting from {args.warm_start} (fresh LR schedule, lr={args.lr})")
+            lr_schedule = linear_schedule(args.lr)
+            load_kwargs["custom_objects"] = {
+                "learning_rate": lr_schedule,
+                "lr_schedule": lr_schedule,
+            }
+        else:
+            print(f"Resuming from {args.resume}")
+        model = PPO.load(source, **load_kwargs)
+        if args.warm_start:
+            model.learning_rate = lr_schedule
+            model.lr_schedule = lr_schedule
     else:
         # Hyperparameters: a solid, known-decent starting point for CarRacing PPO.
         # These are the knobs you'll tune in Step 6 (lr, ent_coef, n_steps, etc.).
