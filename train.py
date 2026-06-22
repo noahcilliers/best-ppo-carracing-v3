@@ -156,6 +156,11 @@ def main():
         if args.warm_start:
             model.learning_rate = lr_schedule
             model.lr_schedule = lr_schedule
+            # PPO.load restores the checkpoint's target_kl (None for the 868), so
+            # without this a warm-start has NO KL guardrail -- a too-hot LR then
+            # blows the policy up (approx_kl in the hundreds) in one update.
+            # Honour --target-kl here so fine-tuning can be capped.
+            model.target_kl = (args.target_kl or None)
     else:
         # Hyperparameters: a solid, known-decent starting point for CarRacing PPO.
         # These are the knobs you'll tune in Step 6 (lr, ent_coef, n_steps, etc.).
