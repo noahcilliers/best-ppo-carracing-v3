@@ -15,8 +15,10 @@ Usage:
 import argparse
 
 import numpy as np
+import pygame
 
 from multicar.multi_car_racing import MultiCarRacing
+from multicar.tracks import TRACK_DIRECTIONS, TRACK_LAYOUTS
 
 
 def main():
@@ -24,21 +26,32 @@ def main():
     p.add_argument("--restitution", type=float, default=0.6, help="bounciness 0..1")
     p.add_argument("--track-scale", type=float, default=1.3)
     p.add_argument("--track-width-scale", type=float, default=1.8)
+    p.add_argument("--track-layout", default="random", choices=TRACK_LAYOUTS)
+    p.add_argument("--track-direction", default="ccw", choices=TRACK_DIRECTIONS)
+    p.add_argument("--spawn-columns", type=int, default=2, help="cars per grid row")
     p.add_argument("--seed", type=int, default=5)
     p.add_argument("--steps", type=int, default=250)
     p.add_argument("--headless", action="store_true", help="no window (for CI/testing)")
+    p.add_argument("--overview", action="store_true", help="show the whole-track map view")
+    p.add_argument("--save-overview", default=None, help="write one full-map PNG after reset")
     args = p.parse_args()
 
     env = MultiCarRacing(
         num_agents=2,
-        render_mode=None if args.headless else "human",
+        render_mode=None if args.headless else ("human_overview" if args.overview else "human"),
         collisions=True,
         restitution=args.restitution,
         track_scale=args.track_scale,
         track_width_scale=args.track_width_scale,
+        track_layout=args.track_layout,
+        track_direction=args.track_direction,
+        spawn_columns=args.spawn_columns,
         random_spawn=False,  # keep the staged positions predictable
     )
     env.reset(seed=args.seed)
+    if args.save_overview:
+        save_overview_png(env, args.save_overview)
+        print(f"Saved overview: {args.save_overview}")
     chaser, target = env.cars  # car 0 chases car 1
 
     # Stage a rear-end: put the target a few lengths ahead of the chaser, both
@@ -71,6 +84,12 @@ def main():
             print(f"  contact! target kicked to {fwd_speed(target):.1f} forward speed")
     env.close()
     print("Done." if bumped else "Done (no contact — try a larger --track-width-scale).")
+
+
+def save_overview_png(env, path):
+    frame = env.render_overview()
+    surf = pygame.surfarray.make_surface(frame.swapaxes(0, 1))
+    pygame.image.save(surf, path)
 
 
 if __name__ == "__main__":

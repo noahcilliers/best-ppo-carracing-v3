@@ -26,31 +26,49 @@ Watch progress live in another terminal:
 """
 
 import argparse
+import os
 import gymnasium as gym
+import torch.nn as nn
+from grass_env import make_carracing
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import (
     SubprocVecEnv,
     VecFrameStack,
     VecMonitor,
+    VecNormalize,
     VecTransposeImage,
 )
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.callbacks import CheckpointCallback
+from callbacks import TailAwareEvalCallback
 
 
 N_STACK = 4          # number of frames stacked so the agent can perceive motion
 ENV_ID = "CarRacing-v3"
 
 
-def build_venv(n_envs: int, seed: int = 0):
-    """A vectorized, grayscale, frame-stacked CarRacing env."""
+def linear_schedule(initial: float):
+    """Learning rate that decays linearly from `initial` to 0 over training.
+
+    SB3 calls this with progress_remaining going 1.0 -> 0.0. Annealing the LR to
+    zero stops the policy from drifting/destabilizing in the late stage of a run
+    (our earlier constant-LR run peaked at 2.8M then regressed)."""
+    def schedule(progress_remaining: float) -> float:
+        return progress_remaining * initial
+    return schedule
+
+
+def build_venv(n_envs: int, seed: int = 0, shaping: dict = None):
+    """A vectorized, grayscale, frame-stacked CarRacing env.
+
+    `shaping` is an optional dict of reward-shaping kwargs (k_grass, k_grass_speed,
+    k_smooth, grass_terminate_steps, grass_terminate_penalty). Pass None/empty for
+    the raw reward (used for the eval env so the eval metric is the true score)."""
     venv = make_vec_env(
-        ENV_ID,
+        make_carracing(**(shaping or {})),               # CarRacing + shaping + grayscale
         n_envs=n_envs,
         seed=seed,
         vec_env_cls=SubprocVecEnv,                       # true parallelism on CPU
-        wrapper_class=gym.wrappers.GrayscaleObservation,  # 96x96x3 -> 96x96x1
-        wrapper_kwargs={"keep_dim": True},
     )
     venv = VecFrameStack(venv, n_stack=N_STACK)          # -> 96x96x4
     venv = VecMonitor(venv)                              # logs episode reward/length
@@ -64,16 +82,48 @@ def main():
     p.add_argument("--device", default="cpu",
                    help="cpu | mps | auto  (MPS is often NOT faster for this small CNN)")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--lr", type=float, default=1e-4,
+                   help="initial learning rate (decays linearly to 0)")
+    p.add_argument("--k-grass", type=float, default=0.0,
+                   help="flat per-wheel per-step grass penalty (0 = off)")
+    p.add_argument("--k-grass-speed", type=float, default=0.0,
+                   help="velocity-linked grass penalty coefficient (0 = off)")
+    p.add_argument("--k-smooth", type=float, default=0.0,
+                   help="action-smoothness penalty coefficient (0 = off)")
+    p.add_argument("--grass-terminate-steps", type=int, default=0,
+                   help="terminate after this many consecutive steps with >=3 wheels on grass (0 = off)")
+    p.add_argument("--grass-terminate-penalty", type=float, default=0.0,
+                   help="reward penalty applied when a grass-termination fires")
+    p.add_argument("--target-kl", type=float, default=0.0,
+                   help="PPO KL early-stop guardrail (0 = disabled)")
     p.add_argument("--resume", default=None,
                    help="path to a checkpoint .zip to continue training from "
                         "(e.g. checkpoints/ppo_carracing_2000000_steps.zip)")
     args = p.parse_args()
 
-    train_env = build_venv(args.n_envs, seed=args.seed)
-    # Match the eval env's wrapper stack to the training env (SB3 auto-applies
-    # VecTransposeImage to image obs) so EvalCallback doesn't warn about a type
-    # mismatch and evaluates on exactly the same observation format.
-    eval_env = VecTransposeImage(build_venv(1, seed=args.seed + 1000))
+    shaping = dict(
+        k_grass=args.k_grass,
+        k_grass_speed=args.k_grass_speed,
+        k_smooth=args.k_smooth,
+        grass_terminate_steps=args.grass_terminate_steps,
+        grass_terminate_penalty=args.grass_terminate_penalty,
+    )
+    train_env = build_venv(args.n_envs, seed=args.seed, shaping=shaping)
+    # #2 Reward normalization: normalize the RETURN stream (stabilizes value-fn
+    # scaling) but NOT the image obs (CnnPolicy already divides by 255). On resume
+    # we reload the saved running stats so normalization stays consistent.
+    vecnorm_path = "checkpoints/vecnormalize.pkl"
+    if args.resume and os.path.exists(vecnorm_path):
+        train_env = VecNormalize.load(vecnorm_path, train_env)
+    else:
+        train_env = VecNormalize(train_env, norm_obs=False, norm_reward=True)
+
+    # Eval env must match the training wrapper stack (VecNormalize) so EvalCallback
+    # can sync stats — but with training=False (don't update stats) and
+    # norm_reward=False (report the RAW game score as the eval metric).
+    eval_env = build_venv(1, seed=args.seed + 1000)
+    eval_env = VecNormalize(eval_env, norm_obs=False, norm_reward=False, training=False)
+    eval_env = VecTransposeImage(eval_env)
 
     if args.resume:
         # Continue a previous run: load the saved weights AND optimizer state,
@@ -87,7 +137,7 @@ def main():
         model = PPO(
             "CnnPolicy",
             train_env,
-            learning_rate=3e-4,
+            learning_rate=linear_schedule(args.lr),  # decays to 0 -> stable endgame
             n_steps=512,            # rollout length PER env  (512 * n_envs per update)
             batch_size=256,
             n_epochs=10,
@@ -97,6 +147,15 @@ def main():
             ent_coef=0.0,
             vf_coef=0.5,
             max_grad_norm=0.5,
+            target_kl=(args.target_kl or None),  # KL early-stop guardrail (None = off)
+            use_sde=True,           # gSDE: smooth exploration that can't blow up std
+            sde_sample_freq=4,      # resample the exploration noise every 4 steps
+            policy_kwargs=dict(
+                log_std_init=-2.0,          # #1 start exploration NARROW (std ~0.14)
+                ortho_init=False,           # #3 RL-Zoo CarRacing recipe knobs
+                activation_fn=nn.GELU,
+                net_arch=dict(pi=[256], vf=[256]),
+            ),
             device=args.device,
             tensorboard_log="runs/",
             verbose=1,
@@ -109,14 +168,13 @@ def main():
         save_path="checkpoints/",
         name_prefix="ppo_carracing",
     )
-    # Periodically evaluate and keep the best-performing model separately.
-    eval_cb = EvalCallback(
+    # Tail-aware eval: keep the most RELIABLE checkpoint (best mean-0.5*std over a
+    # fixed seed set), not the luckiest 5-episode mean.
+    eval_cb = TailAwareEvalCallback(
         eval_env,
-        best_model_save_path="checkpoints/best/",
-        log_path="runs/eval/",
-        eval_freq=max(50_000 // args.n_envs, 1),
-        n_eval_episodes=5,
-        deterministic=True,
+        seeds=range(10),                          # fixed seeds -> comparable evals
+        eval_freq=max(200_000 // args.n_envs, 1),
+        save_path="checkpoints/best/",
     )
 
     print(f"Training {args.timesteps:,} steps on {args.n_envs} envs, device={args.device}")
@@ -131,6 +189,7 @@ def main():
     )
 
     model.save("checkpoints/ppo_carracing_final")
+    train_env.save(vecnorm_path)   # persist reward-normalization stats for resume
     train_env.close()
     eval_env.close()
     print("Done. Final model: checkpoints/ppo_carracing_final.zip")

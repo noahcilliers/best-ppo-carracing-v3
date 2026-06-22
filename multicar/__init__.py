@@ -8,6 +8,7 @@ import gymnasium as gym
 from gymnasium.envs.registration import register
 
 from multicar.multi_car_racing import MultiCarRacing
+from multicar.tracks import INDY_OVAL_LAYOUT, RANDOM_LAYOUT, TRACK_LAYOUTS
 
 # Register once (importing twice must not raise).
 if "MultiCarRacing-v0" not in gym.registry:
@@ -18,4 +19,4 @@ if "MultiCarRacing-v0" not in gym.registry:
         reward_threshold=900,
     )
 
-__all__ = ["MultiCarRacing"]
+__all__ = ["MultiCarRacing", "RANDOM_LAYOUT", "INDY_OVAL_LAYOUT", "TRACK_LAYOUTS"]

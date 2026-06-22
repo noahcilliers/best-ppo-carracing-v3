@@ -38,6 +38,14 @@ from gymnasium.utils import EzPickle
 
 from multicar.rewards import competitive_tile_reward
 from multicar.spawn import compute_spawn_poses
+from multicar.tracks import (
+    INDY_OVAL_LAYOUT,
+    RANDOM_LAYOUT,
+    TRACK_DIRECTIONS,
+    TRACK_LAYOUTS,
+    make_indy_oval_track,
+    validate_track,
+)
 
 try:
     import Box2D
@@ -156,8 +164,9 @@ class MultiCarRacing(gym.Env, EzPickle):
 
     Args:
         num_agents: number of cars sharing the track (default 2).
-        render_mode: ``None``, ``"human"`` (tiled window), ``"rgb_array"``, or
-            ``"state_pixels"``.
+        render_mode: ``None``, ``"human"`` (tiled car cameras),
+            ``"human_overview"`` (whole-track spectator view), ``"rgb_array"``,
+            ``"rgb_array_overview"``, or ``"state_pixels"``.
         verbose: print track-generation diagnostics.
         lap_complete_percent: fraction of tiles a car must visit for a lap.
         domain_randomize: randomize background/track colors each reset.
@@ -168,10 +177,16 @@ class MultiCarRacing(gym.Env, EzPickle):
             Off by default so a race can first be validated without contact.
         max_episode_steps: internal truncation limit, so the env is self-contained
             even when constructed directly (not via ``gym.make`` + ``TimeLimit``).
+        track_layout: named track layout. ``"random"`` preserves stock
+            CarRacing generation; ``"indy_oval"`` uses a deterministic oval.
+        track_direction: ``"ccw"`` or ``"cw"`` for custom layouts.
+        spawn_columns: number of side-by-side grid slots before starting a new
+            row. ``2`` preserves the original start grid; ``3`` gives an
+            Indy-style three-wide start on wide tracks.
     """
 
     metadata = {
-        "render_modes": ["human", "rgb_array", "state_pixels"],
+        "render_modes": ["human", "human_overview", "rgb_array", "rgb_array_overview", "state_pixels"],
         "render_fps": FPS,
     }
 
@@ -189,6 +204,9 @@ class MultiCarRacing(gym.Env, EzPickle):
         track_scale: float = 1.0,
         track_width_scale: float = 1.0,
         restitution: float = 0.0,
+        track_layout: str = RANDOM_LAYOUT,
+        track_direction: str = "ccw",
+        spawn_columns: int = 2,
     ):
         EzPickle.__init__(
             self,
@@ -204,8 +222,17 @@ class MultiCarRacing(gym.Env, EzPickle):
             track_scale,
             track_width_scale,
             restitution,
+            track_layout,
+            track_direction,
+            spawn_columns,
         )
         assert num_agents >= 1, "num_agents must be >= 1"
+        if track_layout not in TRACK_LAYOUTS:
+            raise ValueError(f"track_layout must be one of {TRACK_LAYOUTS}")
+        if track_direction not in TRACK_DIRECTIONS:
+            raise ValueError(f"track_direction must be one of {TRACK_DIRECTIONS}")
+        if spawn_columns < 1:
+            raise ValueError("spawn_columns must be >= 1")
         self.num_agents = num_agents
         self.continuous = continuous
         self.domain_randomize = domain_randomize
@@ -225,6 +252,9 @@ class MultiCarRacing(gym.Env, EzPickle):
         self.track_scale = track_scale
         self.track_width_scale = track_width_scale
         self.restitution = restitution
+        self.track_layout = track_layout
+        self.track_direction = track_direction
+        self.spawn_columns = spawn_columns
         self.track_rad = TRACK_RAD * track_scale
         self.playfield = PLAYFIELD * track_scale
         self.track_width = TRACK_WIDTH * track_width_scale
@@ -242,6 +272,7 @@ class MultiCarRacing(gym.Env, EzPickle):
         self.surf = None
         self.clock = None
         self.isopen = True
+        self._screen_mode = None
         self.road = None
         self.cars: list[Car] = []
         # per-car reward bookkeeping (set fully in reset)
@@ -327,6 +358,31 @@ class MultiCarRacing(gym.Env, EzPickle):
 
     # ------------------------------------------------------------------ track
     def _create_track(self):
+        if self.track_layout == RANDOM_LAYOUT:
+            track = self._create_random_track()
+            if track is None:
+                return False
+        elif self.track_layout == INDY_OVAL_LAYOUT:
+            track = make_indy_oval_track(
+                track_scale=self.track_scale,
+                detail_step=TRACK_DETAIL_STEP,
+                direction=self.track_direction,
+            )
+            validate_track(
+                track,
+                max_gap=TRACK_DETAIL_STEP * 1.5,
+                playfield=self.playfield,
+                road_half_width=self.track_width,
+            )
+        else:
+            raise ValueError(f"unknown track_layout {self.track_layout!r}")
+
+        self._build_track(track)
+        if self.verbose:
+            print(f"Track layout {self.track_layout}: {len(track)} tiles")
+        return True
+
+    def _create_random_track(self):
         CHECKPOINTS = 12
         checkpoints = []
         for c in range(CHECKPOINTS):
@@ -425,8 +481,11 @@ class MultiCarRacing(gym.Env, EzPickle):
             + np.square(first_perp_y * (track[0][3] - track[-1][3]))
         )
         if well_glued_together > TRACK_DETAIL_STEP:
-            return False
+            return None
+        return track
 
+    def _build_track(self, track):
+        self.road = []
         border = [False] * len(track)
         for i in range(len(track)):
             good = True
@@ -443,8 +502,8 @@ class MultiCarRacing(gym.Env, EzPickle):
                 border[i - neg] |= border[i]
 
         for i in range(len(track)):
-            alpha1, beta1, x1, y1 = track[i]
-            alpha2, beta2, x2, y2 = track[i - 1]
+            _, beta1, x1, y1 = track[i]
+            _, beta2, x2, y2 = track[i - 1]
             road1_l = (x1 - self.track_width * math.cos(beta1), y1 - self.track_width * math.sin(beta1))
             road1_r = (x1 + self.track_width * math.cos(beta1), y1 + self.track_width * math.sin(beta1))
             road2_l = (x2 - self.track_width * math.cos(beta2), y2 - self.track_width * math.sin(beta2))
@@ -472,7 +531,6 @@ class MultiCarRacing(gym.Env, EzPickle):
                     ([b1_l, b1_r, b2_r, b2_l], (255, 255, 255) if i % 2 == 0 else (255, 0, 0))
                 )
         self.track = track
-        return True
 
     # ------------------------------------------------------------------ reset
     def reset(self, *, seed=None, options=None):
@@ -510,6 +568,7 @@ class MultiCarRacing(gym.Env, EzPickle):
             self.num_agents,
             self.track_width,
             np_random=self.np_random if self.random_spawn else None,
+            grid_columns=self.spawn_columns,
         )
         self.cars = []
         for car_id, (angle, x, y) in enumerate(poses):
@@ -520,9 +579,9 @@ class MultiCarRacing(gym.Env, EzPickle):
             self._set_car_collisions(car, self.collisions)
             self.cars.append(car)
 
-        if self.render_mode == "human":
-            self._render("human")
-        return self.step(None)[0], {}
+        if self.render_mode in ("human", "human_overview"):
+            self._render(self.render_mode)
+        return self.step(None)[0], self._track_info()
 
     # ------------------------------------------------------------------- step
     def step(self, action):
@@ -562,7 +621,7 @@ class MultiCarRacing(gym.Env, EzPickle):
         step_reward = np.zeros(self.num_agents)
         terminated = False
         truncated = False
-        info = {}
+        info = self._track_info()
         if action is not None:  # first call from reset() passes None
             self._elapsed_steps += 1
             active = ~self.car_done
@@ -594,8 +653,8 @@ class MultiCarRacing(gym.Env, EzPickle):
             info["terminated_per_car"] = self.car_done.copy()
             info["lap_finished_per_car"] = self.lap_finished.copy()
 
-        if self.render_mode == "human":
-            self._render("human")
+        if self.render_mode in ("human", "human_overview"):
+            self._render(self.render_mode)
 
         return (
             self.state,
@@ -604,6 +663,13 @@ class MultiCarRacing(gym.Env, EzPickle):
             truncated,
             info,
         )
+
+    def _track_info(self):
+        return {
+            "track_layout": self.track_layout,
+            "track_direction": self.track_direction,
+            "track_tiles": len(self.track) if hasattr(self, "track") else 0,
+        }
 
     def _squeeze_reward(self, step_reward):
         """Single-car -> float (CarRacing parity); multi-car -> (N,) array."""
@@ -620,6 +686,10 @@ class MultiCarRacing(gym.Env, EzPickle):
             return
         return self._render(self.render_mode)
 
+    def render_overview(self):
+        """Return a full-track RGB overview frame without changing observations."""
+        return self._render("rgb_array_overview")
+
     def _render(self, mode):
         assert mode in self.metadata["render_modes"]
         pygame.font.init()
@@ -629,6 +699,14 @@ class MultiCarRacing(gym.Env, EzPickle):
         if mode == "human":
             self._render_human()
             return self.isopen
+
+        if mode == "human_overview":
+            self._render_human_overview()
+            return self.isopen
+
+        if mode == "rgb_array_overview":
+            surf = self._render_overview_surface(WINDOW_W, WINDOW_H)
+            return self._create_image_array(surf, (WINDOW_W, WINDOW_H))
 
         imgs = [self._render_car_image(k, mode) for k in range(self.num_agents)]
         # Single car -> a plain (H, W, 3) frame, exactly like CarRacing.
@@ -674,7 +752,7 @@ class MultiCarRacing(gym.Env, EzPickle):
         return surf
 
     def _render_human(self):
-        if self.screen is None:
+        if self.screen is None or self._screen_mode != "human":
             pygame.init()
             pygame.display.init()
             cols = math.ceil(math.sqrt(self.num_agents))
@@ -684,6 +762,7 @@ class MultiCarRacing(gym.Env, EzPickle):
             self.screen = pygame.display.set_mode(
                 (self._tile_size[0] * cols, self._tile_size[1] * rows)
             )
+            self._screen_mode = "human"
         if self.clock is None:
             self.clock = pygame.time.Clock()
 
@@ -698,6 +777,80 @@ class MultiCarRacing(gym.Env, EzPickle):
         pygame.event.pump()
         self.clock.tick(self.metadata["render_fps"])
         pygame.display.flip()
+
+    def _render_human_overview(self):
+        if self.screen is None or self._screen_mode != "human_overview":
+            pygame.init()
+            pygame.display.init()
+            self.screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
+            self._screen_mode = "human_overview"
+        if self.clock is None:
+            self.clock = pygame.time.Clock()
+
+        surf = self._render_overview_surface(WINDOW_W, WINDOW_H)
+        self.screen.blit(surf, (0, 0))
+        pygame.event.pump()
+        self.clock.tick(self.metadata["render_fps"])
+        pygame.display.flip()
+
+    def _render_overview_surface(self, width, height):
+        """Render the entire track into one fixed spectator camera."""
+        surf = pygame.Surface((width, height))
+        zoom, trans = self._overview_transform(width, height)
+
+        self.surf = surf
+        self._render_road(zoom, trans, 0.0)
+        for car in self.cars:
+            car.draw(surf, zoom, trans, 0.0, draw_particles=True)
+
+        surf = pygame.transform.flip(surf, False, True)
+        self.surf = surf
+        self._render_overview_markers(zoom, trans, width, height)
+        return surf
+
+    def _overview_transform(self, width, height):
+        min_x, max_x, min_y, max_y = self._overview_bounds()
+        span_x = max(max_x - min_x, 1.0)
+        span_y = max(max_y - min_y, 1.0)
+        screen_pad = 44
+        zoom = min(
+            (width - 2 * screen_pad) / span_x,
+            (height - 2 * screen_pad) / span_y,
+        )
+        center_x = 0.5 * (min_x + max_x)
+        center_y = 0.5 * (min_y + max_y)
+        return zoom, (width / 2 - center_x * zoom, height / 2 - center_y * zoom)
+
+    def _overview_bounds(self):
+        xs = []
+        ys = []
+        for poly, _ in self.road_poly:
+            for x, y in poly:
+                xs.append(x)
+                ys.append(y)
+        for car in self.cars:
+            x, y = car.hull.position
+            xs.append(float(x))
+            ys.append(float(y))
+        if not xs:
+            return -self.playfield, self.playfield, -self.playfield, self.playfield
+
+        pad = max(self.track_width * 4.0, 12.0)
+        return min(xs) - pad, max(xs) + pad, min(ys) - pad, max(ys) + pad
+
+    def _render_overview_markers(self, zoom, trans, width, height):
+        radius = max(6, min(12, int(4 * zoom)))
+        for car in self.cars:
+            x, y = car.hull.position
+            sx = int(x * zoom + trans[0])
+            sy = int(height - (y * zoom + trans[1]))
+            color = tuple(int(255 * c) for c in car.hull.color)
+            pygame.draw.circle(self.surf, (255, 255, 255), (sx, sy), radius + 2)
+            pygame.draw.circle(self.surf, color, (sx, sy), radius)
+
+            heading = np.array([-math.sin(car.hull.angle), math.cos(car.hull.angle)])
+            end = (int(sx + heading[0] * radius * 2), int(sy - heading[1] * radius * 2))
+            pygame.draw.line(self.surf, (0, 0, 0), (sx, sy), end, 2)
 
     def _render_road(self, zoom, translation, angle):
         bounds = self.playfield
@@ -791,3 +944,4 @@ class MultiCarRacing(gym.Env, EzPickle):
             self.isopen = False
             pygame.quit()
             self.screen = None
+            self._screen_mode = None

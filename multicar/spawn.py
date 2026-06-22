@@ -19,6 +19,7 @@ def compute_spawn_poses(
     np_random=None,
     lane_frac=0.5,
     row_step=2,
+    grid_columns=2,
 ):
     """Return a list of ``(init_angle, init_x, init_y)`` start poses.
 
@@ -41,12 +42,16 @@ def compute_spawn_poses(
         lane_frac: lateral offset as a fraction of the half-width
             (``0.5`` places a car mid-way between centerline and edge).
         row_step: number of track points between successive grid rows.
+        grid_columns: number of side-by-side grid slots before starting a new
+            row. The default two-column grid preserves the original behavior.
     """
     n_track = len(track)
     if n_track == 0:
         raise ValueError("track is empty")
     if num_agents < 1:
         raise ValueError("num_agents must be >= 1")
+    if grid_columns < 1:
+        raise ValueError("grid_columns must be >= 1")
 
     # Which grid slot each car takes. Shuffling removes any fixed advantage.
     slots = list(range(num_agents))
@@ -56,14 +61,20 @@ def compute_spawn_poses(
     poses = []
     for car_id in range(num_agents):
         slot = slots[car_id]
-        row = slot // 2
-        side = (slot % 2) * 2 - 1  # -1 (left) or +1 (right)
+        row = slot // grid_columns
+        column = slot % grid_columns
 
         idx = (-row * row_step) % n_track
         _, beta, x, y = track[idx]
 
         # A lone car sits dead-center so the env matches single-car CarRacing.
-        lane = 0.0 if num_agents == 1 else side * track_half_width * lane_frac
+        if num_agents == 1 or grid_columns == 1:
+            lane = 0.0
+        elif grid_columns == 2:
+            lane = ((column * 2) - 1) * track_half_width * lane_frac
+        else:
+            side = (column / (grid_columns - 1)) * 2 - 1
+            lane = side * track_half_width * lane_frac
 
         lat_x, lat_y = math.cos(beta), math.sin(beta)
         poses.append((beta, x + lat_x * lane, y + lat_y * lane))
