@@ -11,6 +11,9 @@ runs/
 # External reference clone (has its own git history)
 multi_car_racing/
 
+# Local agent instructions
+AGENTS.md
+
 # Python
 __pycache__/
 *.pyc
