@@ -341,6 +341,44 @@ Lesson for Attempt 2 — reward FINISHING SOONER, not instantaneous speed:
 - Keep it "a little": low LR, small coefficient, short fine-tune; and measure
   `len` dropping (and completion rate up), not just mean reward.
 
+## Speed Phase, Attempts 2-3: Time Pressure (k_time) — FAILED (too strong)
+
+We added a dense time cost `k_time` (extra `-k_time` per step on top of the base
+`-0.1/step`) and a `k_progress` forward-progress reward, and tried `k_time=0.1`
+(which DOUBLES the per-step penalty to `-0.2`) in two settings. Both failed.
+
+**Attempt 2 — warm-start the 868 + `k_time=0.1` + `k_progress=0.4`, no grass,
+`lr=5e-5`, 1M.** Degraded the 868 instead of speeding it up:
+
+- eval (true game score) regressed **868 -> 800**.
+- `ep_len_mean` rose **931 -> 961** (slower, the WRONG direction).
+- shaped `ep_rew_mean` drifted down (~878 -> ~864); `approx_kl` stuck at 0.6-0.7
+  every update (policy churning, no guardrail), `std` bleeding down.
+- Extra lesson: `k_progress` rewards *completion*, not *speed* (visiting a tile
+  pays the same fast or slow), so it dilutes the time-pressure signal. Dropped it
+  from the next attempt.
+
+**Attempt 3 — from scratch + base + grass (`k_grass_speed=0.05`, grass-terminate
+50/25) + `k_time=0.1` + `k_smooth=0.02`, `lr=1e-4`, 4M target.** Never converged:
+
+- shaped `ep_rew_mean` climbed to ~520 by 300k, then REGRESSED and oscillated
+  285-450 through 800k instead of continuing up (the 868 run was steadily climbing
+  toward ~880 by 1M). `ep_len` stayed 750-920, so it was instability, not the
+  "give-up / terminate-early" failure mode.
+- Killed ~800k. The rendered policy drove onto grass and stalled at the low points.
+
+**Root cause (both): `k_time=0.1` is too strong.** Doubling the per-step penalty
+destabilizes training whether warm-starting a converged policy OR training from
+scratch -- the gradient is conflicted (drive far to earn tiles vs. every step is
+doubly penalized), so the policy can't settle. The base `-0.1/step` already
+provides time pressure; doubling it was the mistake.
+
+**Lesson / next:** time pressure must be GENTLE. Next test is `k_time=0.03` (a 1.3x
+nudge, not 2x) as a warm-start fine-tune of the 868 WITH the grass reliability
+shaping retained, 1M steps, low LR. If even a gentle `k_time` degrades the 868 or
+fails to drop `len`, time-penalty shaping is the wrong lever and the speed phase
+should move to a different one (e.g. the deferred wider camera field-of-view).
+
 ## Multi-Car Environment Work
 
 We have already created a modern multi-car environment rather than relying on the
