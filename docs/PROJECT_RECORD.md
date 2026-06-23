@@ -341,6 +341,86 @@ Lesson for Attempt 2 — reward FINISHING SOONER, not instantaneous speed:
 - Keep it "a little": low LR, small coefficient, short fine-tune; and measure
   `len` dropping (and completion rate up), not just mean reward.
 
+## Speed Phase, Attempts 2-3: Time Pressure (k_time) — FAILED (too strong)
+
+We added a dense time cost `k_time` (extra `-k_time` per step on top of the base
+`-0.1/step`) and a `k_progress` forward-progress reward, and tried `k_time=0.1`
+(which DOUBLES the per-step penalty to `-0.2`) in two settings. Both failed.
+
+**Attempt 2 — warm-start the 868 + `k_time=0.1` + `k_progress=0.4`, no grass,
+`lr=5e-5`, 1M.** Degraded the 868 instead of speeding it up:
+
+- eval (true game score) regressed **868 -> 800**.
+- `ep_len_mean` rose **931 -> 961** (slower, the WRONG direction).
+- shaped `ep_rew_mean` drifted down (~878 -> ~864); `approx_kl` stuck at 0.6-0.7
+  every update (policy churning, no guardrail), `std` bleeding down.
+- Extra lesson: `k_progress` rewards *completion*, not *speed* (visiting a tile
+  pays the same fast or slow), so it dilutes the time-pressure signal. Dropped it
+  from the next attempt.
+
+**Attempt 3 — from scratch + base + grass (`k_grass_speed=0.05`, grass-terminate
+50/25) + `k_time=0.1` + `k_smooth=0.02`, `lr=1e-4`, 4M target.** Never converged:
+
+- shaped `ep_rew_mean` climbed to ~520 by 300k, then REGRESSED and oscillated
+  285-450 through 800k instead of continuing up (the 868 run was steadily climbing
+  toward ~880 by 1M). `ep_len` stayed 750-920, so it was instability, not the
+  "give-up / terminate-early" failure mode.
+- Killed ~800k. The rendered policy drove onto grass and stalled at the low points.
+
+**Root cause (both): `k_time=0.1` is too strong.** Doubling the per-step penalty
+destabilizes training whether warm-starting a converged policy OR training from
+scratch -- the gradient is conflicted (drive far to earn tiles vs. every step is
+doubly penalized), so the policy can't settle. The base `-0.1/step` already
+provides time pressure; doubling it was the mistake.
+
+**Lesson / next:** time pressure must be GENTLE. Next test is `k_time=0.03` (a 1.3x
+nudge, not 2x) as a warm-start fine-tune of the 868 WITH the grass reliability
+shaping retained, 1M steps, low LR. If even a gentle `k_time` degrades the 868 or
+fails to drop `len`, time-penalty shaping is the wrong lever and the speed phase
+should move to a different one (e.g. the deferred wider camera field-of-view).
+
+## Speed Phase, Attempt 4: gentle k_time=0.03 — SUCCEEDED (reliability, not speed)
+
+Warm-start fine-tune of the 868, 1M steps, `lr=5e-5`, reward = base + grass
+(`k_grass_speed=0.05`, grass-terminate 50/25) + `k_time=0.03` (a 1.3x time
+penalty, vs the 2x that failed). No `k_progress`, no instantaneous speed.
+
+The best-by-eval checkpoint (saved as `checkpoints/best_890_ktime_v1.zip`) BEATS
+the 868 — and it held up on held-out seeds, so it is not selection luck:
+
+| metric | 868 | new (seeds 0-24) | 868 | new (held-out 50-99) |
+|---|---|---|---|---|
+| mean | 862.6 | 879.9 | 869.6 | **897.7** |
+| std | 88.0 | 47.6 | 115.2 | **34.1** |
+| min | 534.6 | 765.7 | 266.8 | **736.3** |
+| p10 | 774.3 | 807.7 | 800.3 | **869.8** |
+| score (m-0.5s) | 818.6 | 856.1 | 812.0 | **880.6** |
+| len | 931 | 934 | 920 | 916 |
+| failures (<500) | — | — | 1/50 | **0/50** |
+
+On fresh tracks the gap is LARGER (+28 mean, std cut ~70%, worst episode 267 ->
+736, zero failures). The 868 even threw a catastrophic 267 episode the new model
+never came close to.
+
+KEY interpretation: lap `len` is essentially unchanged (916-934), so the car is
+NOT faster. Gentle time pressure removed HESITATION -- it commits through corners
+instead of the dawdling / over-cautious recovery that caused the 868's bad-tail
+episodes. Time pressure bought DECISIVENESS -> reliability, not lap time.
+
+Lessons (the whole k_time arc):
+- A STRONG per-step time penalty (`k_time=0.1`, 2x) destabilizes training both
+  warm-start and from-scratch (Attempts 2-3).
+- A GENTLE one (`k_time=0.03`, 1.3x) on a competent warm-started policy is stable
+  and improves it -- but the payoff was tail-reduction, not speed. The base
+  CarRacing reward and the 868's skill are already near the lap-time floor; the
+  remaining headroom was in the unreliable tail, which decisiveness fixed.
+
+Champion update: **`best_890_ktime_v1.zip` is the new best solo model** (~890 mean
+across seeds 0-99, std ~34-48, 0% failures). It supersedes the 868 as the
+warm-start base for multi-car self-play. The 868 is retained as
+`best_868_phaseB_v3.zip`; `best/best_model.zip` currently holds the new champion
+(but is overwritten by future runs).
+
 ## Multi-Car Environment Work
 
 We have already created a modern multi-car environment rather than relying on the
