@@ -90,6 +90,12 @@ def main():
                    help="velocity-linked grass penalty coefficient (0 = off)")
     p.add_argument("--k-smooth", type=float, default=0.0,
                    help="action-smoothness penalty coefficient (0 = off)")
+    p.add_argument("--k-time", type=float, default=0.0,
+                   help="dense time cost: extra -k_time per step on top of the base "
+                        "-0.1/step, to reward finishing laps faster (0 = off)")
+    p.add_argument("--k-progress", type=float, default=0.0,
+                   help="forward-progress reward: +k_progress per newly-visited tile "
+                        "per step; pairs with --k-time to stay on the racing line (0 = off)")
     p.add_argument("--grass-terminate-steps", type=int, default=0,
                    help="terminate after this many consecutive steps with >=3 wheels on grass (0 = off)")
     p.add_argument("--grass-terminate-penalty", type=float, default=0.0,
@@ -114,6 +120,8 @@ def main():
         k_grass=args.k_grass,
         k_grass_speed=args.k_grass_speed,
         k_smooth=args.k_smooth,
+        k_time=args.k_time,
+        k_progress=args.k_progress,
         grass_terminate_steps=args.grass_terminate_steps,
         grass_terminate_penalty=args.grass_terminate_penalty,
     )
