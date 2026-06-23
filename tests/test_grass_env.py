@@ -1,4 +1,5 @@
-"""Unit tests for the on-track speed reward (Phase A) in RewardShapingWrapper.
+"""Unit tests for RewardShapingWrapper (squared smoothness penalty, off-by-default
+parity).
 
 Uses a tiny stub env so the math is verified deterministically without spinning
 up Box2D/CarRacing.
@@ -52,31 +53,6 @@ def _step(wrapper, base_env, wheels_on_grass, vx, vy, base_reward=0.0):
     base_env.set_state(wheels_on_grass, vx, vy, base_reward)
     _, reward, _, _, info = wrapper.step(np.zeros(3, dtype=np.float32))
     return reward, info
-
-
-def test_speed_reward_adds_full_bonus_on_track():
-    base = StubCarEnv()
-    wrapper = RewardShapingWrapper(base, k_speed=0.05)
-    # All 4 wheels on road, speed = hypot(3, 4) = 5.0
-    reward, info = _step(wrapper, base, wheels_on_grass=0, vx=3.0, vy=4.0, base_reward=1.0)
-    assert info["speed"] == pytest.approx(5.0)
-    # 1.0 + 0.05 * (4/4) * 5.0
-    assert reward == pytest.approx(1.0 + 0.25)
-
-
-def test_speed_reward_scales_with_wheels_on_road():
-    base = StubCarEnv()
-    wrapper = RewardShapingWrapper(base, k_speed=0.05)
-    # 2 of 4 wheels on grass -> only half the speed bonus
-    reward, _ = _step(wrapper, base, wheels_on_grass=2, vx=10.0, vy=0.0, base_reward=0.0)
-    assert reward == pytest.approx(0.05 * (2 / 4) * 10.0)
-
-
-def test_no_speed_bonus_when_fully_off_track():
-    base = StubCarEnv()
-    wrapper = RewardShapingWrapper(base, k_speed=0.05)
-    reward, _ = _step(wrapper, base, wheels_on_grass=4, vx=10.0, vy=0.0, base_reward=0.0)
-    assert reward == pytest.approx(0.0)
 
 
 def test_disabled_by_default_is_exact_parity():

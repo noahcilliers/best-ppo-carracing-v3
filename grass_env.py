@@ -3,23 +3,15 @@ Phase B reward shaping for CarRacing (every term defaults to OFF, so the clean
 baseline is reproducible). Bundled "stability + control" knobs aimed at the
 off-track / oscillation tail that drives the 657 +/- 233 variance:
 
-  * On-track speed reward    k_speed        -> +k_speed * (wheels_on_road/4) * speed
-        Phase A "go faster" term: the base game only pays the -0.1/step time
-        penalty for dawdling, which the 868 model underweights (several eval
-        seeds run the full 1000 steps without finishing). A direct on-track
-        speed bonus pushes higher cornering/straight-line velocity. Gated on
-        wheels-on-road so it rewards going fast ON the track, never grass-skating
-        -- the exact mirror of the k_grass_speed penalty below.
   * Flat grass penalty       k_grass        -> -k_grass * wheels_on_grass
   * Velocity-linked grass    k_grass_speed  -> -k_grass_speed * (wheels/4) * speed
         Punishes HIGH-SPEED corner-cutting hard, low-speed recovery lightly, so
         the car doesn't become timid (Gemini report's idea).
   * Action-smoothness        k_smooth       -> -k_smooth * sum((action - prev_action)^2)
-        Curbs steering oscillation / overcorrection (all three reports agree);
-        the indispensable partner to k_speed -- it keeps "faster" from becoming
-        "twitchier". Squared (L2) delta matches the multi-car implementation that
-        genuinely helped: it punishes violent jerks hard while leaving fine
-        corrections almost free (an L1 penalty taxes every small adjustment).
+        Curbs steering oscillation / overcorrection (all three reports agree).
+        Squared (L2) delta matches the multi-car implementation that genuinely
+        helped: it punishes violent jerks hard while leaving fine corrections
+        almost free (an L1 penalty taxes every small adjustment).
   * Early-termination        grass_terminate_steps / grass_terminate_penalty
         Ends unrecoverable off-track spirals (>=3 wheels on grass for N steps).
 
@@ -35,13 +27,11 @@ import gymnasium as gym
 
 
 class RewardShapingWrapper(gym.Wrapper):
-    def __init__(self, env, k_grass=0.0, k_grass_speed=0.0, k_speed=0.0,
-                 k_smooth=0.0,
+    def __init__(self, env, k_grass=0.0, k_grass_speed=0.0, k_smooth=0.0,
                  grass_terminate_steps=0, grass_terminate_penalty=0.0):
         super().__init__(env)
         self.k_grass = float(k_grass)
         self.k_grass_speed = float(k_grass_speed)
-        self.k_speed = float(k_speed)
         self.k_smooth = float(k_smooth)
         self.grass_terminate_steps = int(grass_terminate_steps)
         self.grass_terminate_penalty = float(grass_terminate_penalty)
@@ -63,11 +53,6 @@ class RewardShapingWrapper(gym.Wrapper):
             speed = math.hypot(v[0], v[1])
             info["grass_wheels"] = on_grass
             info["speed"] = speed
-
-            if self.k_speed > 0.0:
-                n_wheels = len(car.wheels)
-                on_road = n_wheels - on_grass
-                reward += self.k_speed * (on_road / n_wheels) * speed
 
             if on_grass:
                 if self.k_grass > 0.0:
@@ -94,7 +79,7 @@ class RewardShapingWrapper(gym.Wrapper):
         return obs, reward, terminated, truncated, info
 
 
-def make_carracing(k_grass=0.0, k_grass_speed=0.0, k_speed=0.0, k_smooth=0.0,
+def make_carracing(k_grass=0.0, k_grass_speed=0.0, k_smooth=0.0,
                    grass_terminate_steps=0, grass_terminate_penalty=0.0,
                    render_mode=None):
     """Factory: CarRacing-v3 + (optional) reward shaping + grayscale (keep_dim)."""
@@ -104,7 +89,6 @@ def make_carracing(k_grass=0.0, k_grass_speed=0.0, k_speed=0.0, k_smooth=0.0,
             env,
             k_grass=k_grass,
             k_grass_speed=k_grass_speed,
-            k_speed=k_speed,
             k_smooth=k_smooth,
             grass_terminate_steps=grass_terminate_steps,
             grass_terminate_penalty=grass_terminate_penalty,

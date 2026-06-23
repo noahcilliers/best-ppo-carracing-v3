@@ -88,8 +88,6 @@ def main():
                    help="flat per-wheel per-step grass penalty (0 = off)")
     p.add_argument("--k-grass-speed", type=float, default=0.0,
                    help="velocity-linked grass penalty coefficient (0 = off)")
-    p.add_argument("--k-speed", type=float, default=0.0,
-                   help="on-track speed REWARD coefficient, +k_speed*(wheels_on_road/4)*speed (0 = off)")
     p.add_argument("--k-smooth", type=float, default=0.0,
                    help="action-smoothness penalty coefficient (0 = off)")
     p.add_argument("--grass-terminate-steps", type=int, default=0,
@@ -115,7 +113,6 @@ def main():
     shaping = dict(
         k_grass=args.k_grass,
         k_grass_speed=args.k_grass_speed,
-        k_speed=args.k_speed,
         k_smooth=args.k_smooth,
         grass_terminate_steps=args.grass_terminate_steps,
         grass_terminate_penalty=args.grass_terminate_penalty,
