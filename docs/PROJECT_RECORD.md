@@ -379,6 +379,48 @@ shaping retained, 1M steps, low LR. If even a gentle `k_time` degrades the 868 o
 fails to drop `len`, time-penalty shaping is the wrong lever and the speed phase
 should move to a different one (e.g. the deferred wider camera field-of-view).
 
+## Speed Phase, Attempt 4: gentle k_time=0.03 — SUCCEEDED (reliability, not speed)
+
+Warm-start fine-tune of the 868, 1M steps, `lr=5e-5`, reward = base + grass
+(`k_grass_speed=0.05`, grass-terminate 50/25) + `k_time=0.03` (a 1.3x time
+penalty, vs the 2x that failed). No `k_progress`, no instantaneous speed.
+
+The best-by-eval checkpoint (saved as `checkpoints/best_890_ktime_v1.zip`) BEATS
+the 868 — and it held up on held-out seeds, so it is not selection luck:
+
+| metric | 868 | new (seeds 0-24) | 868 | new (held-out 50-99) |
+|---|---|---|---|---|
+| mean | 862.6 | 879.9 | 869.6 | **897.7** |
+| std | 88.0 | 47.6 | 115.2 | **34.1** |
+| min | 534.6 | 765.7 | 266.8 | **736.3** |
+| p10 | 774.3 | 807.7 | 800.3 | **869.8** |
+| score (m-0.5s) | 818.6 | 856.1 | 812.0 | **880.6** |
+| len | 931 | 934 | 920 | 916 |
+| failures (<500) | — | — | 1/50 | **0/50** |
+
+On fresh tracks the gap is LARGER (+28 mean, std cut ~70%, worst episode 267 ->
+736, zero failures). The 868 even threw a catastrophic 267 episode the new model
+never came close to.
+
+KEY interpretation: lap `len` is essentially unchanged (916-934), so the car is
+NOT faster. Gentle time pressure removed HESITATION -- it commits through corners
+instead of the dawdling / over-cautious recovery that caused the 868's bad-tail
+episodes. Time pressure bought DECISIVENESS -> reliability, not lap time.
+
+Lessons (the whole k_time arc):
+- A STRONG per-step time penalty (`k_time=0.1`, 2x) destabilizes training both
+  warm-start and from-scratch (Attempts 2-3).
+- A GENTLE one (`k_time=0.03`, 1.3x) on a competent warm-started policy is stable
+  and improves it -- but the payoff was tail-reduction, not speed. The base
+  CarRacing reward and the 868's skill are already near the lap-time floor; the
+  remaining headroom was in the unreliable tail, which decisiveness fixed.
+
+Champion update: **`best_890_ktime_v1.zip` is the new best solo model** (~890 mean
+across seeds 0-99, std ~34-48, 0% failures). It supersedes the 868 as the
+warm-start base for multi-car self-play. The 868 is retained as
+`best_868_phaseB_v3.zip`; `best/best_model.zip` currently holds the new champion
+(but is overwritten by future runs).
+
 ## Multi-Car Environment Work
 
 We have already created a modern multi-car environment rather than relying on the
