@@ -275,6 +275,72 @@ problem, now solved, so more solo tuning is diminishing returns. We move to
 Phase 3 (multi-car), warm-starting from the 868 model. Shelved solo ideas are
 recorded in `docs/SOLO_TRAINING_FUTURE_WORK.md`.
 
+## Speed Phase, Attempt 1: Instantaneous Speed Reward — FAILED (reverted)
+
+Goal: take the competent-but-cautious 868 and fine-tune it to finish laps FASTER.
+The 868 often runs the full 1000-step limit without finishing (eval `len` ~931),
+so there was real headroom on lap time.
+
+What we added (branch `phase-a-velocity`):
+
+- An on-track speed reward in `RewardShapingWrapper`:
+  `+k_speed * (wheels_on_road/4) * speed`, gated on wheels-on-road so it only pays
+  for speed ON the track.
+- Aligned `k_smooth` to the squared (L2) action-delta form used in multi-car
+  (KEPT — this was sound, not part of the failure).
+- A real `--warm-start` path in `train.py` (fresh LR schedule + honor `--target-kl`),
+  because `--resume` silently kept the 868's exhausted schedule (LR ~0) and would
+  have frozen learning (KEPT — infra, not part of the failure).
+
+Two missteps along the way (both instructive):
+
+1. First warm-start at `lr=5e-4` COLLAPSED the policy in one update: `approx_kl`
+   ~220, `clip_fraction` 0.98, reward 783 -> 363 -> 211. Cause: a 5x-too-hot LR on
+   an already-converged policy, with no KL guardrail (the 868 has `target_kl=None`)
+   and a fresh `VecNormalize` producing huge early advantages. Lesson: warm-start a
+   converged policy GENTLY (low LR), and a converged-policy fine-tune wants a KL
+   guardrail even though a from-scratch run did not.
+2. Re-ran at `lr=5e-5` (guardrail dropped at user's call). It trained without
+   collapsing; KL/clip ran hot (~0.7 / 0.78) but reward held and it *looked* faster
+   and stayed on track. The visual impression was misleading.
+
+The verdict (eval sweep, 8 checkpoints 100k-800k, 25 fixed seeds, raw game score):
+
+| ckpt | mean | std | min | p10 | score (m-0.5s) | len |
+|---|---|---|---|---|---|---|
+| 868 base | 862.6 | 88.0 | 534.6 | 774.3 | 818.6 | 931 |
+| 400k (best) | 861.6 | 84.2 | 537.8 | 771.6 | 819.5 | 953 |
+| 600k | 849.6 | 117.2 | 443.3 | 768.7 | 791.0 | 950 |
+| 800k | 845.9 | 140.9 | 258.2 | 784.7 | 775.5 | 944 |
+
+- NO checkpoint beat the 868 (best, 400k, only tied it within noise).
+- Gentle regression after ~400k, with WORSE tails late (800k min 258, std 141).
+- The decisive tell: episode `len` went UP (931 -> ~955), not down. We wanted
+  faster laps and got slower ones.
+
+Root cause — a reward-design error, not a hyperparameter one. At a typical on-track
+speed of ~50, the bonus is `0.005 * 50 = +0.25/step`, which OUTWEIGHS the base
+`-0.1/step` time penalty. Net per-step reward on-track is therefore POSITIVE, so the
+shaping pays the car to keep driving — and finishing the lap ENDS that income
+stream. We literally rewarded prolonging the episode, the opposite of the goal.
+
+Decision: reverted the instantaneous speed reward (`k_speed`) from the codebase.
+Kept the squared-smoothness alignment and the `--warm-start` infra. The 868 remains
+the champion (restored to `checkpoints/best/best_model.zip`; safe copy at
+`checkpoints/best_868_phaseB_v3.zip`). Run checkpoints purged.
+
+Lesson for Attempt 2 — reward FINISHING SOONER, not instantaneous speed:
+
+- A dense per-step time cost (`-c/step`) integrates to `-c * total_time`, i.e. it
+  IS a lap-time penalty, but dense so it actually learns (a sparse terminal lap-time
+  bonus is crushed by `gamma^~800` discounting). The base `-0.1/step` already does
+  this weakly; the lever is to strengthen it (e.g. `-0.2/step`), optionally plus a
+  terminal completion bonus scaled by how early the lap finished.
+- HARD RULE: net per-step reward on-track must stay NEGATIVE, so the agent always
+  prefers the episode to end sooner. That is the exact inequality `k_speed` broke.
+- Keep it "a little": low LR, small coefficient, short fine-tune; and measure
+  `len` dropping (and completion rate up), not just mean reward.
+
 ## Multi-Car Environment Work
 
 We have already created a modern multi-car environment rather than relying on the
