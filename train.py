@@ -41,6 +41,7 @@ from stable_baselines3.common.vec_env import (
 )
 from stable_baselines3.common.callbacks import CheckpointCallback
 from callbacks import TailAwareEvalCallback
+from telemetry_env import TelemetryCombinedExtractor, VecTelemetryDict
 
 
 N_STACK = 4          # number of frames stacked so the agent can perceive motion
@@ -58,19 +59,29 @@ def linear_schedule(initial: float):
     return schedule
 
 
-def build_venv(n_envs: int, seed: int = 0, shaping: dict = None):
+def build_venv(n_envs: int, seed: int = 0, shaping: dict = None,
+               zoom_factor: float = 1.0, telemetry: bool = False,
+               symmetric_action: bool = False):
     """A vectorized, grayscale, frame-stacked CarRacing env.
 
     `shaping` is an optional dict of reward-shaping kwargs (k_grass, k_grass_speed,
     k_smooth, grass_terminate_steps, grass_terminate_penalty). Pass None/empty for
-    the raw reward (used for the eval env so the eval metric is the true score)."""
+    the raw reward (used for the eval env so the eval metric is the true score).
+    `zoom_factor` is part of the pixel observation, so train/eval envs must match."""
     venv = make_vec_env(
-        make_carracing(**(shaping or {})),               # CarRacing + shaping + grayscale
+        make_carracing(                                  # CarRacing + shaping + grayscale
+            **(shaping or {}),
+            zoom_factor=zoom_factor,
+            telemetry=telemetry,
+            symmetric_action=symmetric_action,
+        ),
         n_envs=n_envs,
         seed=seed,
         vec_env_cls=SubprocVecEnv,                       # true parallelism on CPU
     )
     venv = VecFrameStack(venv, n_stack=N_STACK)          # -> 96x96x4
+    if telemetry:
+        venv = VecTelemetryDict(venv)                    # -> {"img": stack, "telemetry": current}
     venv = VecMonitor(venv)                              # logs episode reward/length
     return venv
 
@@ -100,6 +111,12 @@ def main():
                    help="terminate after this many consecutive steps with >=3 wheels on grass (0 = off)")
     p.add_argument("--grass-terminate-penalty", type=float, default=0.0,
                    help="reward penalty applied when a grass-termination fires")
+    p.add_argument("--zoom-factor", type=float, default=1.0,
+                   help="camera zoom scale (1.0 = stock CarRacing; 0.7 = wider Phase D FOV)")
+    p.add_argument("--telemetry", action="store_true",
+                   help="use Dict obs with image stack plus current-frame vehicle telemetry")
+    p.add_argument("--symmetric-action", action="store_true",
+                   help="use 2D (steer, throttle) actions mapped to native gas/brake")
     p.add_argument("--target-kl", type=float, default=0.0,
                    help="PPO KL early-stop guardrail (0 = disabled)")
     p.add_argument("--resume", default=None,
@@ -115,6 +132,10 @@ def main():
 
     if args.resume and args.warm_start:
         p.error("use --resume OR --warm-start, not both")
+    if args.zoom_factor <= 0.0:
+        p.error("--zoom-factor must be positive")
+    if (args.telemetry or args.symmetric_action) and args.warm_start:
+        p.error("Phase C obs/action-space changes must train from scratch or --resume a matching checkpoint")
 
     shaping = dict(
         k_grass=args.k_grass,
@@ -125,7 +146,14 @@ def main():
         grass_terminate_steps=args.grass_terminate_steps,
         grass_terminate_penalty=args.grass_terminate_penalty,
     )
-    train_env = build_venv(args.n_envs, seed=args.seed, shaping=shaping)
+    train_env = build_venv(
+        args.n_envs,
+        seed=args.seed,
+        shaping=shaping,
+        zoom_factor=args.zoom_factor,
+        telemetry=args.telemetry,
+        symmetric_action=args.symmetric_action,
+    )
     # #2 Reward normalization: normalize the RETURN stream (stabilizes value-fn
     # scaling) but NOT the image obs (CnnPolicy already divides by 255). On resume
     # we reload the saved running stats so normalization stays consistent.
@@ -138,7 +166,13 @@ def main():
     # Eval env must match the training wrapper stack (VecNormalize) so EvalCallback
     # can sync stats — but with training=False (don't update stats) and
     # norm_reward=False (report the RAW game score as the eval metric).
-    eval_env = build_venv(1, seed=args.seed + 1000)
+    eval_env = build_venv(
+        1,
+        seed=args.seed + 1000,
+        zoom_factor=args.zoom_factor,
+        telemetry=args.telemetry,
+        symmetric_action=args.symmetric_action,
+    )
     eval_env = VecNormalize(eval_env, norm_obs=False, norm_reward=False, training=False)
     eval_env = VecTransposeImage(eval_env)
 
@@ -169,8 +203,24 @@ def main():
     else:
         # Hyperparameters: a solid, known-decent starting point for CarRacing PPO.
         # These are the knobs you'll tune in Step 6 (lr, ent_coef, n_steps, etc.).
+        policy = "MultiInputPolicy" if args.telemetry else "CnnPolicy"
+        policy_kwargs = dict(
+            log_std_init=-2.0,          # #1 start exploration NARROW (std ~0.14)
+            ortho_init=False,           # #3 RL-Zoo CarRacing recipe knobs
+            activation_fn=nn.GELU,
+            net_arch=dict(pi=[256], vf=[256]),
+        )
+        if args.telemetry:
+            policy_kwargs.update(
+                features_extractor_class=TelemetryCombinedExtractor,
+                features_extractor_kwargs=dict(
+                    cnn_output_dim=256,
+                    telemetry_features_dim=32,
+                ),
+            )
+
         model = PPO(
-            "CnnPolicy",
+            policy,
             train_env,
             learning_rate=linear_schedule(args.lr),  # decays to 0 -> stable endgame
             n_steps=512,            # rollout length PER env  (512 * n_envs per update)
@@ -185,12 +235,7 @@ def main():
             target_kl=(args.target_kl or None),  # KL early-stop guardrail (None = off)
             use_sde=True,           # gSDE: smooth exploration that can't blow up std
             sde_sample_freq=4,      # resample the exploration noise every 4 steps
-            policy_kwargs=dict(
-                log_std_init=-2.0,          # #1 start exploration NARROW (std ~0.14)
-                ortho_init=False,           # #3 RL-Zoo CarRacing recipe knobs
-                activation_fn=nn.GELU,
-                net_arch=dict(pi=[256], vf=[256]),
-            ),
+            policy_kwargs=policy_kwargs,
             device=args.device,
             tensorboard_log="runs/",
             verbose=1,
@@ -212,7 +257,9 @@ def main():
         save_path="checkpoints/best/",
     )
 
-    print(f"Training {args.timesteps:,} steps on {args.n_envs} envs, device={args.device}")
+    print(f"Training {args.timesteps:,} steps on {args.n_envs} envs, device={args.device}, "
+          f"zoom_factor={args.zoom_factor}, telemetry={args.telemetry}, "
+          f"symmetric_action={args.symmetric_action}")
     print("Watch the 'fps' value in the logs — that's your throughput.")
     model.learn(
         total_timesteps=args.timesteps,

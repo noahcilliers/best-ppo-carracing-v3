@@ -11,6 +11,7 @@ tracks, per-car observations, optional collisions, and named custom layouts.
 - Grayscale, 4-frame-stacked image observations for motion-aware control.
 - Optional reward shaping for grass/off-track behavior, action smoothness, and
   sustained off-track termination.
+- Optional wide-field camera observations for Phase D perception experiments.
 - Tail-aware checkpoint evaluation over fixed seeds, selecting for reliability
   instead of a lucky mean reward.
 - A Gymnasium-compatible `MultiCarRacing` environment with N cars in one Box2D
@@ -88,6 +89,16 @@ Reward-shaped stability run:
   --grass-terminate-penalty 25
 ```
 
+Wide-field perception experiment:
+
+```bash
+.venv/bin/python train.py \
+  --timesteps 4000000 \
+  --n-envs 8 \
+  --k-time 0.03 \
+  --zoom-factor 0.7
+```
+
 Training writes checkpoints under `checkpoints/` and TensorBoard logs under
 `runs/`.
 
@@ -105,6 +116,7 @@ existing weights, such as fine-tuning with changed reward shaping.
 .venv/bin/python evaluate.py \
   --model checkpoints/best/best_model.zip \
   --episodes 50 \
+  --zoom-factor 1.0 \
   --dump docs/eval_run.json
 ```
 
@@ -114,7 +126,7 @@ tail-aware score, and failure rate over fixed seeds.
 ## Watch a trained policy
 
 ```bash
-.venv/bin/python watch_model.py --model checkpoints/best/best_model.zip
+.venv/bin/python watch_model.py --model checkpoints/best/best_model.zip --zoom-factor 1.0
 ```
 
 To compare against a pretrained Hugging Face SB3 policy:
@@ -175,6 +187,7 @@ Try the scripted collision demo:
 | --- | --- |
 | `train.py` | PPO training entrypoint for single-car `CarRacing-v3` |
 | `grass_env.py` | Reward-shaping wrapper and CarRacing factory |
+| `wide_env.py` | Wide-field camera variant for Phase D perception experiments |
 | `callbacks.py` | Tail-aware evaluation callback for checkpoint selection |
 | `evaluate.py` | Fixed-seed checkpoint evaluation CLI |
 | `watch_model.py` | Render a local trained checkpoint |
