@@ -15,13 +15,14 @@ Usage:
 
 import argparse
 import numpy as np
-import gymnasium as gym
+from grass_env import make_carracing
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import (
     DummyVecEnv,
     VecFrameStack,
     VecTransposeImage,
 )
+from telemetry_env import VecTelemetryDict
 
 N_STACK = 4   # must match train.py
 
@@ -30,17 +31,30 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", default="checkpoints/best/best_model.zip")
     p.add_argument("--episodes", type=int, default=3)
+    p.add_argument("--zoom-factor", type=float, default=1.0,
+                   help="camera zoom scale used by the watched model (1.0 = stock)")
+    p.add_argument("--telemetry", action="store_true",
+                   help="watch a model trained with Dict image+telemetry observations")
+    p.add_argument("--symmetric-action", action="store_true",
+                   help="watch a model trained with 2D symmetric throttle actions")
     args = p.parse_args()
+    if args.zoom_factor <= 0.0:
+        p.error("--zoom-factor must be positive")
 
     model = PPO.load(args.model)
     print(f"Loaded {args.model}")
 
-    def make_env():
-        env = gym.make("CarRacing-v3", render_mode="human")
-        return gym.wrappers.GrayscaleObservation(env, keep_dim=True)
-
-    env = DummyVecEnv([make_env])
+    env = DummyVecEnv([
+        make_carracing(
+            render_mode="human",
+            zoom_factor=args.zoom_factor,
+            telemetry=args.telemetry,
+            symmetric_action=args.symmetric_action,
+        )
+    ])
     env = VecFrameStack(env, n_stack=N_STACK)
+    if args.telemetry:
+        env = VecTelemetryDict(env)
     env = VecTransposeImage(env)
 
     for ep in range(args.episodes):

@@ -29,13 +29,23 @@ from stable_baselines3.common.vec_env import (
     VecFrameStack,
     VecTransposeImage,
 )
+from telemetry_env import VecTelemetryDict
 
 N_STACK = 4   # must match train.py
 
 
-def build_eval_env():
-    env = DummyVecEnv([make_carracing(k_grass=0.0)])   # raw reward, grayscale
+def build_eval_env(zoom_factor=1.0, telemetry=False, symmetric_action=False):
+    env = DummyVecEnv([
+        make_carracing(
+            k_grass=0.0,
+            zoom_factor=zoom_factor,
+            telemetry=telemetry,
+            symmetric_action=symmetric_action,
+        )
+    ])  # raw reward
     env = VecFrameStack(env, n_stack=N_STACK)
+    if telemetry:
+        env = VecTelemetryDict(env)
     env = VecTransposeImage(env)
     return env
 
@@ -45,13 +55,25 @@ def main():
     p.add_argument("--model", default="checkpoints/best/best_model.zip")
     p.add_argument("--episodes", type=int, default=50)
     p.add_argument("--seed-start", type=int, default=0)
+    p.add_argument("--zoom-factor", type=float, default=1.0,
+                   help="camera zoom scale used by the evaluated model (1.0 = stock)")
+    p.add_argument("--telemetry", action="store_true",
+                   help="evaluate a model trained with Dict image+telemetry observations")
+    p.add_argument("--symmetric-action", action="store_true",
+                   help="evaluate a model trained with 2D symmetric throttle actions")
     p.add_argument("--fail-threshold", type=float, default=500.0,
                    help="episodes scoring below this count as failures (tail metric)")
     p.add_argument("--dump", default=None, help="optional path to save per-episode JSON")
     args = p.parse_args()
+    if args.zoom_factor <= 0.0:
+        p.error("--zoom-factor must be positive")
 
     model = PPO.load(args.model)
-    env = build_eval_env()
+    env = build_eval_env(
+        zoom_factor=args.zoom_factor,
+        telemetry=args.telemetry,
+        symmetric_action=args.symmetric_action,
+    )
 
     per_episode = []
     for i in range(args.episodes):
@@ -73,6 +95,9 @@ def main():
     failures = int((rewards < args.fail_threshold).sum())
 
     print(f"\nModel: {args.model}")
+    print(f"Zoom factor: {args.zoom_factor}")
+    print(f"Telemetry: {args.telemetry}")
+    print(f"Symmetric action: {args.symmetric_action}")
     print(f"Episodes: {args.episodes} (seeds {args.seed_start}..{args.seed_start + args.episodes - 1})")
     print("-" * 52)
     print(f"  mean         {rewards.mean():8.1f}")
@@ -87,7 +112,17 @@ def main():
 
     if args.dump:
         with open(args.dump, "w") as f:
-            json.dump({"model": args.model, "episodes": per_episode}, f, indent=2)
+            json.dump(
+                {
+                    "model": args.model,
+                    "zoom_factor": args.zoom_factor,
+                    "telemetry": args.telemetry,
+                    "symmetric_action": args.symmetric_action,
+                    "episodes": per_episode,
+                },
+                f,
+                indent=2,
+            )
         print(f"Per-episode results saved to {args.dump}")
         worst = sorted(per_episode, key=lambda e: e["reward"])[:5]
         print("5 worst seeds (hard-turn candidates):",

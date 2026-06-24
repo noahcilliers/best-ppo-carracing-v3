@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from gymnasium import Env, spaces
 
-from grass_env import RewardShapingWrapper
+from grass_env import RewardShapingWrapper, SymmetricActionWrapper
 
 
 class _Wheel:
@@ -103,3 +103,36 @@ def test_smoothness_penalty_is_squared_delta():
     base.set_state(0, 0.0, 0.0, base_reward=0.0)
     _, reward, _, _, _ = wrapper.step(np.array([-1.0, 0.0, 0.0], dtype=np.float32))
     assert reward == pytest.approx(-0.4)
+
+
+def test_symmetric_action_maps_throttle_to_exclusive_gas_brake():
+    base = StubCarEnv()
+    wrapper = SymmetricActionWrapper(base)
+
+    assert wrapper.action_space.shape == (2,)
+    np.testing.assert_allclose(
+        wrapper.action(np.array([0.25, 0.75], dtype=np.float32)),
+        np.array([0.25, 0.75, 0.0], dtype=np.float32),
+    )
+    np.testing.assert_allclose(
+        wrapper.action(np.array([-0.5, -0.4], dtype=np.float32)),
+        np.array([-0.5, 0.0, 0.4], dtype=np.float32),
+    )
+    np.testing.assert_allclose(
+        wrapper.action(np.array([2.0, -2.0], dtype=np.float32)),
+        np.array([1.0, 0.0, 1.0], dtype=np.float32),
+    )
+
+
+def test_symmetric_action_keeps_smoothness_penalty_on_native_action():
+    base = StubCarEnv()
+    shaped = RewardShapingWrapper(base, k_smooth=1.0)
+    wrapper = SymmetricActionWrapper(shaped)
+
+    base.set_state(0, 0.0, 0.0, base_reward=0.0)
+    wrapper.step(np.array([0.0, 1.0], dtype=np.float32))
+    base.set_state(0, 0.0, 0.0, base_reward=0.0)
+    _, reward, _, _, _ = wrapper.step(np.array([0.0, -1.0], dtype=np.float32))
+
+    # RewardShapingWrapper sees [0, 1, 0] -> [0, 0, 1], not raw 2D throttle.
+    assert reward == pytest.approx(-2.0)
