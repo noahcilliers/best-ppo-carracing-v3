@@ -89,6 +89,11 @@ class TelemetryObs(gym.Wrapper):
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
         self.telemetry = read_telemetry(self.env)
+        if terminated or truncated:
+            # The vec env auto-resets on episode end BEFORE VecTelemetryDict can
+            # read telemetry via get_attr, so the terminal-step telemetry would be
+            # lost. Stash it on the info dict to pair with `terminal_observation`.
+            info["terminal_telemetry"] = self.telemetry.copy()
         return obs, reward, terminated, truncated, info
 
 
@@ -112,7 +117,22 @@ class VecTelemetryDict(VecEnvWrapper):
 
     def step_wait(self):
         obs, rewards, dones, infos = self.venv.step_wait()
-        return self._merge(obs), rewards, dones, infos
+        merged = self._merge(obs)
+        for info in infos:
+            terminal_obs = info.get("terminal_observation")
+            if terminal_obs is None:
+                continue
+            # SB3 runs `terminal_observation` through the policy too, so it must be
+            # the SAME Dict the policy expects. Without this it stays a bare image
+            # array and obs_to_tensor crashes in is_vectorized_dict_observation.
+            terminal_telemetry = info.pop("terminal_telemetry", None)
+            if terminal_telemetry is None:
+                terminal_telemetry = np.zeros(TELEMETRY_DIM, dtype=np.float32)
+            info["terminal_observation"] = {
+                self.img_key: terminal_obs,
+                self.telemetry_key: np.asarray(terminal_telemetry, dtype=np.float32),
+            }
+        return merged, rewards, dones, infos
 
     def step_async(self, actions) -> None:
         self.venv.step_async(actions)
