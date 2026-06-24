@@ -121,6 +121,49 @@ def test_vec_telemetry_dict_merges_after_frame_stack():
         env.close()
 
 
+class TerminatingTelemetryEnv(TinyTelemetryEnv):
+    """Tiny env that terminates after 3 steps, to exercise terminal_observation."""
+
+    def step(self, action):
+        obs, reward, _terminated, _truncated, info = super().step(action)
+        return obs, reward, self._step >= 3, False, info
+
+
+def test_terminal_observation_rebuilt_as_dict():
+    """Regression: a terminating episode must yield a Dict terminal_observation
+    matching the policy's obs space.
+
+    Before the fix, VecTelemetryDict left `terminal_observation` as a bare image
+    array while the MultiInputPolicy expected a Dict, so SB3's collect_rollouts
+    crashed in is_vectorized_dict_observation (IndexError on observation["img"]).
+    """
+    from stable_baselines3.common.utils import is_vectorized_observation
+
+    env = DummyVecEnv([lambda: TelemetryObs(TerminatingTelemetryEnv())])
+    env = VecFrameStack(env, n_stack=4)
+    env = VecTelemetryDict(env)
+    env = VecTransposeImage(env)
+    try:
+        env.reset()
+        terminal = None
+        for _ in range(5):
+            _, _, dones, infos = env.step(np.zeros((1, 3), dtype=np.float32))
+            if dones[0]:
+                terminal = infos[0]["terminal_observation"]
+                break
+
+        assert terminal is not None, "episode never terminated"
+        assert isinstance(terminal, dict)
+        assert set(terminal) == {"img", "telemetry"}
+        assert terminal["img"].shape == (4, 96, 96)        # stacked + transposed
+        assert terminal["telemetry"].shape == (TELEMETRY_DIM,)
+        assert "terminal_telemetry" not in infos[0]         # consumed, not leaked
+        # The exact SB3 call that raised IndexError before the fix.
+        assert is_vectorized_observation(terminal, env.observation_space) is False
+    finally:
+        env.close()
+
+
 def test_transposed_dict_obs_feeds_telemetry_extractor():
     env = DummyVecEnv([lambda: TelemetryObs(TinyTelemetryEnv())])
     env = VecFrameStack(env, n_stack=4)
