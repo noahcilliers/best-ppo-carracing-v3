@@ -45,6 +45,30 @@ import numpy as np
 import gymnasium as gym
 
 
+class SymmetricActionWrapper(gym.ActionWrapper):
+    """Expose (steer, throttle) while sending native (steer, gas, brake)."""
+
+    def __init__(self, env):
+        super().__init__(env)
+        self.action_space = gym.spaces.Box(
+            low=-1.0,
+            high=1.0,
+            shape=(2,),
+            dtype=np.float32,
+        )
+
+    def action(self, action):
+        steer, throttle = np.clip(
+            np.asarray(action, dtype=np.float32),
+            self.action_space.low,
+            self.action_space.high,
+        )
+        return np.array(
+            [steer, max(throttle, 0.0), max(-throttle, 0.0)],
+            dtype=np.float32,
+        )
+
+
 class RewardShapingWrapper(gym.Wrapper):
     def __init__(self, env, k_grass=0.0, k_grass_speed=0.0, k_smooth=0.0,
                  k_time=0.0, k_progress=0.0,
@@ -120,7 +144,7 @@ class RewardShapingWrapper(gym.Wrapper):
 def make_carracing(k_grass=0.0, k_grass_speed=0.0, k_smooth=0.0,
                    k_time=0.0, k_progress=0.0,
                    grass_terminate_steps=0, grass_terminate_penalty=0.0,
-                   render_mode=None):
+                   render_mode=None, telemetry=False, symmetric_action=False):
     """Factory: CarRacing-v3 + (optional) reward shaping + grayscale (keep_dim)."""
     def _init():
         env = gym.make("CarRacing-v3", render_mode=render_mode)
@@ -134,6 +158,11 @@ def make_carracing(k_grass=0.0, k_grass_speed=0.0, k_smooth=0.0,
             grass_terminate_steps=grass_terminate_steps,
             grass_terminate_penalty=grass_terminate_penalty,
         )
+        if symmetric_action:
+            env = SymmetricActionWrapper(env)
         env = gym.wrappers.GrayscaleObservation(env, keep_dim=True)
+        if telemetry:
+            from telemetry_env import TelemetryObs
+            env = TelemetryObs(env)
         return env
     return _init
